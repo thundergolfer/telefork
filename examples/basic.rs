@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // use nix::sys::signal::{raise, Signal};
 
 thread_local! {
-    static TEST_TLS : AtomicU32 = AtomicU32::new(7);
+    static TEST_TLS : AtomicU32 = AtomicU32::new(8);
 }
 
 fn print_tls_val() {

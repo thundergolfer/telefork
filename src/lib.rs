@@ -770,3 +770,24 @@ pub fn yoyo<A: ToSocketAddrs, F: FnOnce() -> ()>(dest: A, f: F) {
     let status = wait_for_exit(child).unwrap();
     std::process::exit(status);
 }
+
+
+// Helper that attaches to a running process and dumps its state to a file
+// for later restore.
+pub fn teledump(pid: i32, out: &mut dyn Write) -> Result<()> {
+    let child = Pid::from_raw(pid);
+    // TODO: This is wrong! Just a copy-paste from telefork, but here we need to read the remote brk state.
+    // == 1. Record anything we can easily record within our own process
+    let proc_state = ProcessState {
+        // sbrk(0) returns current brk address and it won't change for child since we don't malloc before forking
+        brk_addr: unsafe { libc::sbrk(0) as usize },
+    };
+
+    if let Err(_) = ptrace::attach(child) {
+        return error("failed to attach to process");
+    };
+    write_state(out, child, proc_state)?;
+
+    ptrace::detach(child, None)?;
+    Ok(())
+}

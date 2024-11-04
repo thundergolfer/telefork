@@ -17,6 +17,7 @@ systems programming concepts.
 # Examples
 
 - `basic` and `load`: Save and restore a process state to a file
+- `dump` (_new_ ✨): Dump a running process to a file
 - `teleserver` and `teleclient`: Fork a process to a remote server
 - `yoyo_client` and `yoyo_client_raw`: Execute a closure on a remote server by teleforking there and back
 - `smallpt`: Use `yoyo` to run a path tracing render on a remote server from a local executable.

@@ -36,6 +36,8 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::FromRawFd;
 
+pub mod cmd;
+
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const PAGE_SIZE: usize = 4096;
@@ -774,7 +776,7 @@ pub fn yoyo<A: ToSocketAddrs, F: FnOnce() -> ()>(dest: A, f: F) {
 
 // Helper that attaches to a running process and dumps its state to a file
 // for later restore.
-pub fn teledump(pid: i32, out: &mut dyn Write) -> Result<()> {
+pub fn teledump(pid: i32, out: &mut dyn Write, leave_running: bool) -> Result<()> {
     let child = Pid::from_raw(pid);
     // TODO: This is wrong! Just a copy-paste from telefork, but here we need to read the remote brk state.
     // == 1. Record anything we can easily record within our own process
@@ -788,6 +790,13 @@ pub fn teledump(pid: i32, out: &mut dyn Write) -> Result<()> {
     };
     write_state(out, child, proc_state)?;
 
-    ptrace::detach(child, None)?;
+    if leave_running {
+        ptrace::detach(child, None)?;
+    } else {
+        if let Err(_) = ptrace::kill(child) {
+            return error("failed to kill the process");
+        }
+    }
+
     Ok(())
 }

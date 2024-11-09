@@ -15,6 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fname = "dump.telefork.bin";
     let mut output = File::create(fname).unwrap();
     println!("dumping pid {:?}", pid);
-    teledump(pid, &mut output)?;
+    teledump(pid, &mut output, true)?;
     Ok(())
 }

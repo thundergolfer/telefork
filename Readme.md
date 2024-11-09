@@ -1,6 +1,8 @@
 # telefork
 
-Check out [the blog post I wrote about this project](https://thume.ca/2020/04/18/telefork-forking-a-process-onto-a-different-computer/)!
+This is a fork of the [original project by Tristan Hume](https://github.com/trishume/telefork).
+It is focused on modifying the code to provide a CRIU-like interface and attempting the "even crazier
+ideas" that Tristan suggested in the [original blogpost](https://thume.ca/2020/04/18/telefork-forking-a-process-onto-a-different-computer/).
 
 Basically it's like the `fork()` syscall except it can fork a process onto a
 different computer. It does this using a bunch of ptrace magic to serialize
@@ -9,7 +11,7 @@ on the other end along with the registers and some other process state.
 
 # How it works
 
-Read the code in `src/lib.rs!`. I specifically wrote it all in **one file with
+Read the code in `src/lib.rs!`. Tristan wrote it all in **one file with
 tons of comments** in an order meant to read top to bottom. Hopefully it should
 be easy enough to understand what it's doing, provided some familiarity with
 systems programming concepts.

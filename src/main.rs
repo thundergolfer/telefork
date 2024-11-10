@@ -9,7 +9,6 @@ use telefork::cmd;
 
 const NAME: &str = "telefork";
 
-
 #[derive(Debug, Parser)]
 #[clap(name = NAME, version)]
 pub struct App {
@@ -19,7 +18,6 @@ pub struct App {
     #[clap(subcommand)]
     command: Command,
 }
-
 
 #[derive(Debug, Args)]
 struct GlobalOpts {
@@ -44,7 +42,7 @@ enum Command {
     Restore {
         /// The dumped file to restore from.
         path: Utf8PathBuf,
-    }
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,15 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     tracing_subscriber::fmt()
-    .with_env_filter(
-        EnvFilter::builder()
-            .with_default_directive(level)
-            .from_env_lossy(),
-    )
-    .init();
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(level)
+                .from_env_lossy(),
+        )
+        .init();
 
     match cli.command {
-        Command::Dump { process_id, path, leave_running } => {
+        Command::Dump {
+            process_id,
+            path,
+            leave_running,
+        } => {
             cmd::dump(process_id, path, leave_running)?;
         }
         Command::Restore { path } => {
@@ -75,4 +77,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-

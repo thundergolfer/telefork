@@ -4,6 +4,8 @@ This is a fork of the [original project by Tristan Hume](https://github.com/tris
 It is focused on modifying the code to provide a CRIU-like interface and attempting the "even crazier
 ideas" that Tristan suggested in the [original blogpost](https://thume.ca/2020/04/18/telefork-forking-a-process-onto-a-different-computer/).
 
+# Usage
+
 ```
 Usage: telefork [OPTIONS] <COMMAND>
 
@@ -22,6 +24,21 @@ Basically it's like the `fork()` syscall except it can fork a process onto a
 different computer. It does this using a bunch of ptrace magic to serialize
 the memory mappings of the process, stream them over a pipe and recreate them
 on the other end along with the registers and some other process state.
+
+## Example
+
+```bash
+# 1. Start a process to dump.
+./examples/dumpme.sh &
+# 2. Grab its PID
+PID=$!
+# 3. Wait for it to progress a bit before dumping
+sleep 3
+# 4. Dump the process to a file
+telefork dump $PID checkpoint.img
+# 5. Restore the process from the file and wait for it to finish!
+telefork restore checkpoint.img
+```
 
 # How it works
 

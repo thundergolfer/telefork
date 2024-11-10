@@ -1,11 +1,15 @@
+use crate::{teledump, telepad, wait_for_exit};
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::Path;
-use crate::{teledump, telepad, wait_for_exit};
 
 use tracing::info;
 
-pub fn dump(pid: i32, path: impl AsRef<Path>, leave_running: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn dump(
+    pid: i32,
+    path: impl AsRef<Path>,
+    leave_running: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut output = File::create(&path).map_err(|e| {
         Box::new(std::io::Error::new(
             ErrorKind::Other,

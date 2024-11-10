@@ -27,7 +27,9 @@ use proc_maps;
 // We use these to serialize our state over the wire
 use bincode;
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
+use std::collections::HashMap;
 // Error handling
 use std::error::Error;
 use std::io::{Read, Write};
@@ -37,7 +39,6 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::FromRawFd;
 
 pub mod cmd;
-
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const PAGE_SIZE: usize = 4096;
@@ -74,8 +75,7 @@ pub fn telefork(out: &mut dyn Write) -> Result<TeleforkLocation> {
         // On the other end the process will be restarted from its frozen
         // state and return thinking its a forked child to this point, so
         // return from telefork notifying we're on the other end.
-        NormalForkLocation::Woke(v) =>
-            return Ok(TeleforkLocation::Child(v)),
+        NormalForkLocation::Woke(v) => return Ok(TeleforkLocation::Child(v)),
         NormalForkLocation::Parent(p) => p,
     };
     // == 3. Inspect all the pieces of state and stream them out
@@ -133,6 +133,7 @@ enum Command {
         addr: usize,
         size: usize,
     },
+    FileDescriptors(ConnectionMap),
     ResumeWithRegisters {
         len: usize,
     },
@@ -312,6 +313,10 @@ fn write_state(out: &mut dyn Write, child: Pid, proc_state: ProcessState) -> Res
         write_regular_map(out, child, map)?;
     }
 
+    // === Write file descriptors
+    let cm = scan_file_descriptors(child.as_raw())?;
+    bincode::serialize_into::<&mut dyn Write, Command>(out, &Command::FileDescriptors(cm))?;
+
     // === Write registers
     let regs = RegInfo {
         regs: ptrace::getregs(child)?,
@@ -358,7 +363,10 @@ fn single_step(child: Pid) -> Result<()> {
     ptrace::step(child, None)?;
     match waitpid(child, None)? {
         WaitStatus::Stopped(_, Signal::SIGTRAP) => Ok(()),
-        _ => error("couldn't single step child"),
+        err => {
+            tracing::error!("waitpid error = {:?}", err);
+            error("couldn't single step child")
+        }
     }
 }
 
@@ -401,7 +409,7 @@ fn remote_brk(child: Pid, syscall: SyscallLoc, brk: usize) -> Result<usize> {
     // == 2. Modify only the registers involved in the syscall
     let syscall_regs = libc::user_regs_struct {
         rip: loc as u64, // syscall instr (rip is the instruction pointer)
-        rax: 12,         // munmap (rax holds the syscall number)
+        rax: 12,         // brk (rax holds the syscall number)
         rdi: brk as u64, // addr (first argument to syscall goes in rdi)
         ..regs
     };
@@ -584,6 +592,138 @@ fn restore_brk(child: Pid, syscall: SyscallLoc, brk_addr: usize) -> Result<()> {
     Ok(())
 }
 
+#[allow(unused)]
+fn buggsy() {}
+
+fn remote_open(child: Pid, syscall: SyscallLoc, path: &str, flags: i32) -> Result<u32> {
+    let SyscallLoc(loc) = syscall;
+    let mode = 0; // TODO
+
+    // == 0. Allocate memory for the pathname
+    if path.len() > PAGE_SIZE {
+        return error("long pathname not supported");
+    }
+    // This virtual address is in the child's address space.
+    let path_addr = remote_mmap_anon(
+        child,
+        syscall,
+        None,
+        PAGE_SIZE,
+        PROT_READ | PROT_WRITE | PROT_EXEC,
+    )?;
+    let bytes_reader: &mut dyn std::io::Read = &mut &path.as_bytes()[..];
+    stream_memory(child, bytes_reader, path_addr, path.as_bytes().len())?;
+
+    // == 1. Get the current register state so we can modify
+    let regs = ptrace::getregs(child)?;
+    // == 2. Modify only the registers involved in the syscall
+    let syscall_regs = libc::user_regs_struct {
+        rip: loc as u64,       // syscall instr (rip is the instruction pointer)
+        rax: 2,                // open (rax holds the syscall number)
+        rdi: path_addr as u64, // addr (first argument to syscall goes in rdi)
+        rsi: flags as u64,     // flags (second argument to syscall goes in rsi)
+        rdx: mode as u64,      // mode (third argument to syscall goes in rdx)
+        ..regs
+    };
+    // == 2. Set the modified regs
+    ptrace::setregs(child, syscall_regs)?;
+    // == 3. Execute the syscall instruction (we set rip to point to it)
+    single_step(child)?;
+    // == 4. Get the registers so we can extract the return value from rax
+    let new_regs = ptrace::getregs(child)?;
+    if (new_regs.rax as i64) < 0 {
+        tracing::error!("rax = {:x}; rip = {:x}", new_regs.rax, new_regs.rip);
+        error("failed to open")?;
+    }
+
+    let fd = new_regs.rax as u32;
+
+    // == 5. Unmap the memory temporarily used to pass the pathname
+    remote_munmap(child, syscall, path_addr, path.len())?;
+
+    Ok(fd)
+}
+
+fn remote_dup2(child: Pid, syscall: SyscallLoc, oldfd: u32, newfd: u32) -> Result<u32> {
+    let SyscallLoc(loc) = syscall;
+    // == 1. Get the current register state so we can modify
+    let regs = ptrace::getregs(child)?;
+    // == 2. Modify only the registers involved in the syscall
+    let syscall_regs = libc::user_regs_struct {
+        rip: loc as u64,   // syscall instr (rip is the instruction pointer)
+        rax: 33,           // dup2 (rax holds the syscall number)
+        rdi: oldfd as u64, // (first argument to syscall goes in rdi)
+        rsi: newfd as u64, // (second argument to syscall goes in rsi)
+        ..regs
+    };
+    // == 2. Set the modified regs
+    ptrace::setregs(child, syscall_regs)?;
+    // == 3. Execute the syscall instruction (we set rip to point to it)
+    single_step(child)?;
+    // == 4. Get the registers so we can extract the return value from rax
+    let new_regs = ptrace::getregs(child)?;
+    if new_regs.rax != newfd as u64 {
+        tracing::error!("rax = {:x}; rip = {:x}", new_regs.rax, new_regs.rip);
+        error("failed to dup2")?;
+    }
+    Ok(0)
+}
+
+fn remote_lseek(child: Pid, syscall: SyscallLoc, fd: u32, offset: u64) -> Result<()> {
+    let SyscallLoc(loc) = syscall;
+    let regs = ptrace::getregs(child)?;
+    let syscall_regs = libc::user_regs_struct {
+        rip: loc as u64,   // syscall instr (rip is the instruction pointer)
+        rax: 8,           // lseek (rax holds the syscall number)
+        rdi: fd as u64,    // (first argument to syscall goes in rdi)
+        rsi: offset as u64, // (second argument to syscall goes in rsi)
+        rdx: libc::SEEK_SET as u64,           // (third argument to syscall goes in rdx)
+        ..regs
+    };
+    // == 2. Set the modified regs
+    ptrace::setregs(child, syscall_regs)?;
+    // == 3. Execute the syscall instruction (we set rip to point to it)
+    single_step(child)?;
+    // == 4. Get the registers so we can extract the return value from rax
+    let new_regs = ptrace::getregs(child)?;
+    if new_regs.rax != offset as u64 {
+        tracing::error!("rax = {:x}; rip = {:x}", new_regs.rax, new_regs.rip);
+        error("failed to lseek")?;
+    }
+
+    Ok(())
+}
+
+/// TODO
+fn restore_file_descriptors(child: Pid, syscall: SyscallLoc, cm: ConnectionMap) -> Result<()> {
+    fn restore_file(child: Pid, syscall: SyscallLoc, fd: u32, path: String, offset: u64) -> Result<()> {
+        let open_fd = remote_open(child, syscall, &path, libc::O_RDONLY)?;
+        tracing::debug!("opened file descriptor {} for {}", open_fd, path);
+        remote_dup2(child, syscall, open_fd, fd)?;
+        remote_lseek(child, syscall, fd, offset)?;
+        Ok(())
+    }
+
+    for (fd, conn) in cm {
+        match conn {
+            Connection::Invalid => {
+                warn!("invalid file descriptor {}", fd);
+            }
+            Connection::Tcp(_) => {
+                warn!("skipping tcp file descriptor {}", fd);
+            }
+            Connection::File(FileConnection { path, offset }) => {
+                tracing::debug!("restoring file descriptor {} for {} at offset {}", fd, path, offset);
+                restore_file(child, syscall, fd, path, offset)?;
+            }
+            Connection::Stdio(_) => {
+                assert!(fd <= 2);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The other end of a `telefork`. Receive a program from a read channel and
 /// rehydrate it as a child process, passing it an i32 and return its pid.
 pub fn telepad(inp: &mut dyn Read, pass_to_child: i32) -> Result<Pid> {
@@ -640,7 +780,6 @@ pub fn telepad(inp: &mut dyn Read, pass_to_child: i32) -> Result<Pid> {
                     // especially if the program doesn't use any vDSO
                     // syscalls. See later TODO comment on handling vDSOs.
 
-
                     // error("size mismatch in remap")?;
                     eprintln!("size mismatch in remap for {}", name);
                 }
@@ -668,6 +807,14 @@ pub fn telepad(inp: &mut dyn Read, pass_to_child: i32) -> Result<Pid> {
                 // TODO set new area filenames
                 stream_memory(child, inp, addr, m.size)?;
                 // TODO remote mprotect to restore previous permissions
+            }
+            Command::FileDescriptors(cm) => {
+                restore_file_descriptors(child, vdso_syscall, cm)?;
+                let cm = scan_file_descriptors(child.as_raw())?;
+                tracing::debug!("restored file descriptors:");
+                for (fd, conn) in cm {
+                    tracing::debug!("fd = {}; {:?}", fd, conn);
+                }
             }
             Command::ResumeWithRegisters { len } => {
                 let mut reg_bytes = vec![0u8; len];
@@ -713,6 +860,17 @@ pub fn telepad(inp: &mut dyn Read, pass_to_child: i32) -> Result<Pid> {
 
     // This lets the other process be stopped without triggering out waitpid,
     // as well as to be debugged by a different ptrace-er
+
+    for i in 1..10000 {
+        if i == 1 {
+            tracing::debug!("step {}", i);
+            let regs = ptrace::getregs(child)?;
+            tracing::debug!("regs = {:?}", regs);
+        }
+        single_step(child)?;
+    }
+
+    tracing::debug!("detaching from child");
     ptrace::detach(child, None)?;
 
     // Return the child pid so that we can do things or wait on it
@@ -773,7 +931,6 @@ pub fn yoyo<A: ToSocketAddrs, F: FnOnce() -> ()>(dest: A, f: F) {
     std::process::exit(status);
 }
 
-
 // Helper that attaches to a running process and dumps its state to a file
 // for later restore.
 pub fn teledump(pid: i32, out: &mut dyn Write, leave_running: bool) -> Result<()> {
@@ -785,7 +942,7 @@ pub fn teledump(pid: i32, out: &mut dyn Write, leave_running: bool) -> Result<()
         brk_addr: unsafe { libc::sbrk(0) as usize },
     };
 
-    if let Err(_) = ptrace::attach(child) {
+    if ptrace::attach(child).is_err() {
         return error("failed to attach to process");
     };
     write_state(out, child, proc_state)?;
@@ -793,10 +950,121 @@ pub fn teledump(pid: i32, out: &mut dyn Write, leave_running: bool) -> Result<()
     if leave_running {
         ptrace::detach(child, None)?;
     } else {
-        if let Err(_) = ptrace::kill(child) {
+        if ptrace::kill(child).is_err() {
             return error("failed to kill the process");
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Connection {
+    Invalid,
+    Tcp(TcpConnection),
+    File(FileConnection),
+    Stdio(StdioConnection),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TcpConnection {
+    local_addr: String,
+    remote_addr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileConnection {
+    path: String,
+    offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StdioConnection {}
+
+type ConnectionMap = HashMap<u32, Connection>;
+
+use std::os::unix::fs::FileTypeExt;
+
+fn get_fd_offset(pid: i32, fd: u32) -> Result<Option<u64>> {
+    use std::io::BufRead;
+    let fdinfo_path = format!("/proc/{}/fdinfo/{}", pid, fd);
+    let file = match std::fs::File::open(&fdinfo_path) {
+        Ok(f) => f,
+        Err(_) => {
+            return error("failed to open fdinfo");
+        }
+    };
+    let reader = std::io::BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with("pos:") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(offset_str) = parts.get(1) {
+                if let Ok(offset) = offset_str.parse::<u64>() {
+                    return Ok(Some(offset));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn scan_file_descriptors(pid: i32) -> Result<ConnectionMap> {
+    let fd_dir: String = format!("/proc/{}/fd", pid);
+    let entries = std::fs::read_dir(fd_dir)?;
+
+    let mut cm: ConnectionMap = HashMap::new();
+
+    for entry in entries {
+        let entry = entry?;
+        let fd_path = entry.path();
+        let fd = fd_path.file_name().unwrap().to_string_lossy();
+        // Read the symbolic link to get the file descriptor target
+        let target = std::fs::read_link(&fd_path)?;
+        let metadata = std::fs::metadata(&target)?;
+        let file_type = metadata.file_type();
+        info!("file descriptor {}: {:?}", fd, target);
+
+        if file_type.is_file() {
+            let fd = fd.parse::<u32>().unwrap();
+            let offset = get_fd_offset(pid, fd)?.unwrap_or(0);
+            cm.insert(
+                fd,
+                Connection::File(FileConnection {
+                    path: target.to_string_lossy().to_string(),
+                    offset,
+                }),
+            );
+        } else if file_type.is_dir() {
+            cm.insert(
+                fd.parse::<u32>().unwrap(),
+                Connection::File(FileConnection {
+                    path: target.to_string_lossy().to_string(),
+                    offset: 0,
+                }),
+            );
+        } else if file_type.is_socket() {
+            cm.insert(
+                fd.parse::<u32>().unwrap(),
+                Connection::Tcp(TcpConnection {
+                    local_addr: target.to_string_lossy().to_string(),
+                    remote_addr: target.to_string_lossy().to_string(),
+                }),
+            );
+        } else if file_type.is_char_device() {
+            let fd = fd.parse::<u32>().unwrap();
+            if matches!(fd, 0..=2) {
+                cm.insert(fd, Connection::Stdio(StdioConnection {}));
+            } else {
+                warn!("saving unsupported file descriptor");
+                cm.insert(fd, Connection::Invalid);
+            }
+        } else {
+            warn!("saving unsupported file descriptor");
+            cm.insert(fd.parse::<u32>().unwrap(), Connection::Invalid);
+        }
+    }
+    Ok(cm)
 }

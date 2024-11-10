@@ -40,6 +40,14 @@ telefork dump $PID checkpoint.img
 telefork restore checkpoint.img
 ```
 
+`dumpme.sh` is a simple script that counts slowly to 10 with `echo` and `sleep`.
+In the example above you can save the process once it's counted to 3 and then
+later restore it and see it finish counting to 10 before exiting successfully!
+
+This example uses all the features originally implemented by Tristan _plus_ basic
+file descriptor restoration, needed because a bash process will read from its source
+code file before exiting.
+
 # How it works
 
 Read the code in `src/lib.rs!`. Tristan wrote it all in **one file with

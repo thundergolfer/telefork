@@ -4,6 +4,20 @@ This is a fork of the [original project by Tristan Hume](https://github.com/tris
 It is focused on modifying the code to provide a CRIU-like interface and attempting the "even crazier
 ideas" that Tristan suggested in the [original blogpost](https://thume.ca/2020/04/18/telefork-forking-a-process-onto-a-different-computer/).
 
+```
+Usage: telefork [OPTIONS] <COMMAND>
+
+Commands:
+  dump     Dump a running process to a file for later restoration
+  restore  Restore a process from a dumped file
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose <VERBOSE>  Verbosity level (can be specified multiple times) [default: 0]
+  -h, --help               Print help
+  -V, --version            Print version
+```
+
 Basically it's like the `fork()` syscall except it can fork a process onto a
 different computer. It does this using a bunch of ptrace magic to serialize
 the memory mappings of the process, stream them over a pipe and recreate them

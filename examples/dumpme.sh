@@ -10,7 +10,7 @@
 #
 # I think this is because telefork isn't restoring any file descriptors.
 
-for i in {1..10}
+for i in {1..20}
 do
   echo "step $i"
   sleep 1

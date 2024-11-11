@@ -27,7 +27,7 @@ use proc_maps;
 // We use these to serialize our state over the wire
 use bincode;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use std::collections::HashMap;
 // Error handling
@@ -39,6 +39,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::FromRawFd;
 
 pub mod cmd;
+pub mod cuda;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const PAGE_SIZE: usize = 4096;
@@ -673,11 +674,11 @@ fn remote_lseek(child: Pid, syscall: SyscallLoc, fd: u32, offset: u64) -> Result
     let SyscallLoc(loc) = syscall;
     let regs = ptrace::getregs(child)?;
     let syscall_regs = libc::user_regs_struct {
-        rip: loc as u64,   // syscall instr (rip is the instruction pointer)
-        rax: 8,           // lseek (rax holds the syscall number)
-        rdi: fd as u64,    // (first argument to syscall goes in rdi)
-        rsi: offset as u64, // (second argument to syscall goes in rsi)
-        rdx: libc::SEEK_SET as u64,           // (third argument to syscall goes in rdx)
+        rip: loc as u64,            // syscall instr (rip is the instruction pointer)
+        rax: 8,                     // lseek (rax holds the syscall number)
+        rdi: fd as u64,             // (first argument to syscall goes in rdi)
+        rsi: offset as u64,         // (second argument to syscall goes in rsi)
+        rdx: libc::SEEK_SET as u64, // (third argument to syscall goes in rdx)
         ..regs
     };
     // == 2. Set the modified regs
@@ -696,7 +697,13 @@ fn remote_lseek(child: Pid, syscall: SyscallLoc, fd: u32, offset: u64) -> Result
 
 /// TODO
 fn restore_file_descriptors(child: Pid, syscall: SyscallLoc, cm: ConnectionMap) -> Result<()> {
-    fn restore_file(child: Pid, syscall: SyscallLoc, fd: u32, path: String, offset: u64) -> Result<()> {
+    fn restore_file(
+        child: Pid,
+        syscall: SyscallLoc,
+        fd: u32,
+        path: String,
+        offset: u64,
+    ) -> Result<()> {
         let open_fd = remote_open(child, syscall, &path, libc::O_RDONLY)?;
         tracing::debug!("opened file descriptor {} for {}", open_fd, path);
         remote_dup2(child, syscall, open_fd, fd)?;
@@ -713,7 +720,12 @@ fn restore_file_descriptors(child: Pid, syscall: SyscallLoc, cm: ConnectionMap) 
                 warn!("skipping tcp file descriptor {}", fd);
             }
             Connection::File(FileConnection { path, offset }) => {
-                tracing::debug!("restoring file descriptor {} for {} at offset {}", fd, path, offset);
+                tracing::debug!(
+                    "restoring file descriptor {} for {} at offset {}",
+                    fd,
+                    path,
+                    offset
+                );
                 restore_file(child, syscall, fd, path, offset)?;
             }
             Connection::Stdio(_) => {
@@ -860,15 +872,6 @@ pub fn telepad(inp: &mut dyn Read, pass_to_child: i32) -> Result<Pid> {
 
     // This lets the other process be stopped without triggering out waitpid,
     // as well as to be debugged by a different ptrace-er
-
-    for i in 1..10000 {
-        if i == 1 {
-            tracing::debug!("step {}", i);
-            let regs = ptrace::getregs(child)?;
-            tracing::debug!("regs = {:?}", regs);
-        }
-        single_step(child)?;
-    }
 
     tracing::debug!("detaching from child");
     ptrace::detach(child, None)?;
@@ -1021,45 +1024,50 @@ fn scan_file_descriptors(pid: i32) -> Result<ConnectionMap> {
         let entry = entry?;
         let fd_path = entry.path();
         let fd = fd_path.file_name().unwrap().to_string_lossy();
+        debug!("processing file descriptor {}", fd);
         // Read the symbolic link to get the file descriptor target
         let target = std::fs::read_link(&fd_path)?;
-        let metadata = std::fs::metadata(&target)?;
-        let file_type = metadata.file_type();
+        debug!("reading file descriptor {} target {} metadata", fd, target.display());
+        let metadata = std::fs::metadata(&target).ok();
         info!("file descriptor {}: {:?}", fd, target);
-
-        if file_type.is_file() {
-            let fd = fd.parse::<u32>().unwrap();
-            let offset = get_fd_offset(pid, fd)?.unwrap_or(0);
-            cm.insert(
-                fd,
-                Connection::File(FileConnection {
-                    path: target.to_string_lossy().to_string(),
-                    offset,
-                }),
-            );
-        } else if file_type.is_dir() {
-            cm.insert(
-                fd.parse::<u32>().unwrap(),
-                Connection::File(FileConnection {
-                    path: target.to_string_lossy().to_string(),
-                    offset: 0,
-                }),
-            );
-        } else if file_type.is_socket() {
-            cm.insert(
-                fd.parse::<u32>().unwrap(),
-                Connection::Tcp(TcpConnection {
-                    local_addr: target.to_string_lossy().to_string(),
-                    remote_addr: target.to_string_lossy().to_string(),
-                }),
-            );
-        } else if file_type.is_char_device() {
-            let fd = fd.parse::<u32>().unwrap();
-            if matches!(fd, 0..=2) {
-                cm.insert(fd, Connection::Stdio(StdioConnection {}));
+        if let Some(file_type) = metadata.map(|m| m.file_type()) {
+            if file_type.is_file() {
+                let fd = fd.parse::<u32>().unwrap();
+                let offset = get_fd_offset(pid, fd)?.unwrap_or(0);
+                cm.insert(
+                    fd,
+                    Connection::File(FileConnection {
+                        path: target.to_string_lossy().to_string(),
+                        offset,
+                    }),
+                );
+            } else if file_type.is_dir() {
+                cm.insert(
+                    fd.parse::<u32>().unwrap(),
+                    Connection::File(FileConnection {
+                        path: target.to_string_lossy().to_string(),
+                        offset: 0,
+                    }),
+                );
+            } else if file_type.is_socket() {
+                cm.insert(
+                    fd.parse::<u32>().unwrap(),
+                    Connection::Tcp(TcpConnection {
+                        local_addr: target.to_string_lossy().to_string(),
+                        remote_addr: target.to_string_lossy().to_string(),
+                    }),
+                );
+            } else if file_type.is_char_device() {
+                let fd = fd.parse::<u32>().unwrap();
+                if matches!(fd, 0..=2) {
+                    cm.insert(fd, Connection::Stdio(StdioConnection {}));
+                } else {
+                    warn!("saving unsupported file descriptor");
+                    cm.insert(fd, Connection::Invalid);
+                }
             } else {
                 warn!("saving unsupported file descriptor");
-                cm.insert(fd, Connection::Invalid);
+                cm.insert(fd.parse::<u32>().unwrap(), Connection::Invalid);
             }
         } else {
             warn!("saving unsupported file descriptor");

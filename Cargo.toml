@@ -14,6 +14,7 @@ clap = { version = "4.5.18", features = ["derive"] }
 camino = "1.1.9"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+memfd-exec = "0.2.1"
 
 [dev-dependencies]
 num_cpus = "1.12"

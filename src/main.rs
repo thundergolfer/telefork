@@ -37,11 +37,17 @@ enum Command {
         /// Restore the process running after dumping.
         #[clap(long)]
         leave_running: bool,
+        /// Enable CUDA support.
+        #[clap(long)]
+        cuda: bool,
     },
     /// Restore a process from a dumped file.
     Restore {
         /// The dumped file to restore from.
         path: Utf8PathBuf,
+        /// Enable CUDA support.
+        #[clap(long)]
+        cuda: bool,
     },
 }
 
@@ -68,11 +74,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             process_id,
             path,
             leave_running,
+            cuda,
         } => {
-            cmd::dump(process_id, path, leave_running)?;
+            cmd::dump(process_id, path, leave_running, cuda)?;
         }
-        Command::Restore { path } => {
-            cmd::restore(path)?;
+        Command::Restore { path, cuda } => {
+            cmd::restore(path, cuda)?;
         }
     }
     Ok(())
